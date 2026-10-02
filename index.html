@@ -28,6 +28,11 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .it span{position:absolute;top:6px;left:6px;font-size:11px;padding:2px 7px;border-radius:99px;background:rgba(0,0,0,.6);color:#fff}
 .it a{display:block;text-align:center;font-size:12px;padding:6px;color:var(--ac);text-decoration:none}
 h2{font-size:16px;margin:0 0 4px}
+#scan{display:none;margin-top:14px}#scan video{width:100%;max-width:360px;border-radius:12px;background:#000;display:block}
+button.alt{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+#qr{background:#fff;padding:10px;border-radius:10px;display:inline-block;line-height:0;min-height:40px}
+#qrBox{margin-top:16px;padding-top:16px;border-top:1px solid var(--bd)}
+#base{width:100%;max-width:340px;font:14px system-ui,sans-serif;letter-spacing:0;text-transform:none;padding:8px 10px;text-align:left}
 </style>
 </head>
 <body>
@@ -42,10 +47,27 @@ h2{font-size:16px;margin:0 0 4px}
         <div class="row">
           <input id="target" type="text" maxlength="4" placeholder="A1B2" autocomplete="off">
           <button id="go">連線</button>
+          <button id="scanBtn" class="alt">📷 掃描</button>
         </div>
       </div>
     </div>
     <p class="st" id="st" style="margin:14px 0 0">正在取得編號…</p>
+    <div id="scan">
+      <video id="vid" playsinline muted></video>
+      <canvas id="cv" hidden></canvas>
+      <p class="st" style="margin:8px 0 0">請將對方的二維碼對準鏡頭 <button id="scanStop" class="alt" style="padding:4px 12px;font-size:13px">關閉</button></p>
+    </div>
+    <div id="qrBox" class="row" style="align-items:flex-start;gap:16px">
+      <div id="qr"></div>
+      <div style="flex:1;min-width:200px">
+        <h2>📱 手機掃描連線</h2>
+        <p class="st" style="margin:0 0 8px">用手機相機掃描,即可開啟本頁並自動連到這部電腦。</p>
+        <div id="baseWrap" style="display:none !important">
+          <label>你正在用本機檔案開啟,請貼上此頁的網上網址(https://…),手機才能打開:</label>
+          <input id="base" type="text" placeholder="https://your-site.netlify.app/">
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="card">
@@ -63,10 +85,13 @@ h2{font-size:16px;margin:0 0 4px}
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
 <script>
 const PREFIX='pclink-', CH='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const $=id=>document.getElementById(id);
-let peer, conn;
+const SITE='https://aromabakeryaimin-air.github.io/CL-Oline/';
+let peer, conn, autoDone=false, stream, scanning=false;
 
 const rid=()=>Array.from({length:4},()=>CH[Math.floor(Math.random()*CH.length)]).join('');
 const say=(t,ok)=>{$('st').textContent=t;$('st').className='st'+(ok?' ok':'')};
@@ -74,7 +99,12 @@ const say=(t,ok)=>{$('st').textContent=t;$('st').className='st'+(ok?' ok':'')};
 function start(){
   const id=rid();
   peer=new Peer(PREFIX+id);
-  peer.on('open',()=>{$('myId').textContent=id;say('等待連線中… 或輸入對方編號後按「連線」')});
+  peer.on('open',()=>{
+    $('myId').textContent=id;say('等待連線中… 或輸入對方編號後按「連線」');
+    drawQR();
+    const c=new URLSearchParams(location.search).get('c');
+    if(c&&/^[A-Za-z0-9]{4}$/.test(c)&&!autoDone){autoDone=true;$('target').value=c.toUpperCase();$('go').click()}
+  });
   peer.on('connection',c=>setup(c));
   peer.on('error',e=>{
     if(e.type==='unavailable-id'){peer.destroy();start();return}
@@ -133,6 +163,53 @@ $('file').onchange=e=>{send(e.target.files);e.target.value=''};
 dz.ondragover=e=>{e.preventDefault();dz.classList.add('on')};
 dz.ondragleave=()=>dz.classList.remove('on');
 dz.ondrop=e=>{e.preventDefault();dz.classList.remove('on');send(e.dataTransfer.files)};
+
+function drawQR(){
+  const code=$('myId').textContent;
+  const base=location.protocol.startsWith('http')?location.origin+location.pathname:SITE;
+  const box=$('qr');box.innerHTML='';
+  if(!base){box.style.lineHeight='1.4';box.style.color='#888';box.style.fontSize='12px';box.textContent='貼上網址後顯示';return}
+  box.style.cssText='';
+  new QRCode(box,{text:base+'?c='+code,width:140,height:140,correctLevel:QRCode.CorrectLevel.M});
+}
+
+function parseCode(t){
+  t=(t||'').trim();
+  if(/^[A-Za-z0-9]{4}$/.test(t))return t.toUpperCase();
+  try{const c=new URL(t).searchParams.get('c');if(c&&/^[A-Za-z0-9]{4}$/.test(c))return c.toUpperCase()}catch(_){}
+  return null;
+}
+function stopScan(){
+  scanning=false;
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  $('scan').style.display='none';
+}
+async function startScan(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){say('此瀏覽器不支援相機(需使用 https 網址)');return}
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+  }catch(e){say('無法開啟相機,請允許相機權限');return}
+  const v=$('vid');v.srcObject=stream;await v.play();
+  $('scan').style.display='block';scanning=true;
+  const cv=$('cv'),ctx=cv.getContext('2d',{willReadFrequently:true});
+  const tick=()=>{
+    if(!scanning)return;
+    if(v.readyState===v.HAVE_ENOUGH_DATA&&v.videoWidth){
+      cv.width=v.videoWidth;cv.height=v.videoHeight;
+      ctx.drawImage(v,0,0);
+      const img=ctx.getImageData(0,0,cv.width,cv.height);
+      const r=jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});
+      if(r){
+        const code=parseCode(r.data);
+        if(code){stopScan();$('target').value=code;$('go').click();return}
+      }
+    }
+    requestAnimationFrame(tick);
+  };
+  tick();
+}
+$('scanBtn').onclick=startScan;
+$('scanStop').onclick=stopScan;
 
 start();
 </script>
